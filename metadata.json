@@ -1,0 +1,8 @@
+{
+  "name": "E-Noticeboard",
+  "description": "A digital campus noticeboard application for managing announcements and updates.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
