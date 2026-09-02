@@ -1,12 +1,23 @@
 import { useState, useEffect, useMemo } from 'react';
 import { initialNotices } from './data';
 import { Notice, Category } from './types';
+import emptyStateImg from './assets/images/empty_noticeboard_illustration_1788379002481.jpg';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Plus, Bell, Bookmark, Search, BookOpen, 
   Building, Users, AlertTriangle, Trash2, X, BookmarkCheck, CheckCircle, Info,
-  Sun, Moon, Clock, Share2, Printer
+  Sun, Moon, Clock, Share2, Printer, Database, Flame, RefreshCw, Key
 } from 'lucide-react';
+import { 
+  getDb, 
+  getFirebaseConfig, 
+  subscribeToNotices, 
+  addNoticeToFirestore, 
+  deleteNoticeFromFirestore, 
+  saveCustomFirebaseConfig, 
+  resetFirebaseConfig,
+  syncLocalNoticesToFirestore
+} from './lib/firebase';
 
 type ToastMessage = {
   id: string;
@@ -111,12 +122,39 @@ export default function App() {
   const [isSearchFocused, setIsSearchFocused] = useState(false);
   const [activeCategory, setActiveCategory] = useState<Category | 'All' | 'Pinned'>('All');
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isFirebaseModalOpen, setIsFirebaseModalOpen] = useState(false);
   const [selectedNotice, setSelectedNotice] = useState<Notice | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [isFirebaseConnected, setIsFirebaseConnected] = useState(false);
+
+  // Subscribe to real-time Firestore notices if Firebase is configured
+  useEffect(() => {
+    const db = getDb();
+    if (!db) {
+      setIsFirebaseConnected(false);
+      return;
+    }
+
+    setIsFirebaseConnected(true);
+    const unsubscribe = subscribeToNotices(
+      (firestoreNotices) => {
+        if (firestoreNotices.length > 0) {
+          setNotices(firestoreNotices);
+        }
+      },
+      (err) => {
+        setIsFirebaseConnected(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [isFirebaseModalOpen]);
 
   useEffect(() => {
-    localStorage.setItem('enoticeboard_data', JSON.stringify(notices));
-  }, [notices]);
+    if (!isFirebaseConnected) {
+      localStorage.setItem('enoticeboard_data', JSON.stringify(notices));
+    }
+  }, [notices, isFirebaseConnected]);
 
   useEffect(() => {
     localStorage.setItem('enoticeboard_pinned', JSON.stringify(pinnedIds));
@@ -181,21 +219,50 @@ export default function App() {
     });
   };
 
-  const addNotice = (notice: Omit<Notice, 'id' | 'date'>) => {
-    const newNotice: Notice = {
-      ...notice,
-      id: Math.random().toString(36).substring(7),
-      date: new Date().toISOString()
-    };
-    setNotices([newNotice, ...notices]);
+  const addNotice = async (notice: Omit<Notice, 'id' | 'date'>) => {
     setIsModalOpen(false);
-    showToast('Notice successfully posted');
+    if (isFirebaseConnected) {
+      try {
+        await addNoticeToFirestore(notice);
+        showToast('Notice posted to Firebase!');
+      } catch (err) {
+        console.error('Failed to post to Firestore:', err);
+        showToast('Failed to save to Firebase, saving locally.', 'info');
+        const newNotice: Notice = {
+          ...notice,
+          id: Math.random().toString(36).substring(7),
+          date: new Date().toISOString()
+        };
+        setNotices(prev => [newNotice, ...prev]);
+      }
+    } else {
+      const newNotice: Notice = {
+        ...notice,
+        id: Math.random().toString(36).substring(7),
+        date: new Date().toISOString()
+      };
+      setNotices([newNotice, ...notices]);
+      showToast('Notice posted locally');
+    }
   };
 
-  const deleteNotice = (id: string) => {
-    setNotices(notices.filter(n => n.id !== id));
-    setPinnedIds(pinnedIds.filter(p => p !== id));
-    showToast('Notice deleted');
+  const deleteNotice = async (id: string) => {
+    if (isFirebaseConnected) {
+      try {
+        await deleteNoticeFromFirestore(id);
+        setPinnedIds(prev => prev.filter(p => p !== id));
+        showToast('Notice deleted from Firebase');
+      } catch (err) {
+        console.error('Failed to delete from Firestore:', err);
+        setNotices(prev => prev.filter(n => n.id !== id));
+        setPinnedIds(prev => prev.filter(p => p !== id));
+        showToast('Notice deleted locally', 'info');
+      }
+    } else {
+      setNotices(notices.filter(n => n.id !== id));
+      setPinnedIds(pinnedIds.filter(p => p !== id));
+      showToast('Notice deleted');
+    }
   };
 
   const handleShare = async (notice: Notice) => {
@@ -302,6 +369,15 @@ export default function App() {
               </div>
               
               <button
+                onClick={() => setIsFirebaseModalOpen(true)}
+                className="relative p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors shrink-0"
+                title={isFirebaseConnected ? "Firebase Connected (enoticeboard)" : "Configure Firebase Connection"}
+              >
+                <Flame className={`w-4 h-4 ${isFirebaseConnected ? 'text-amber-500' : 'text-slate-400'}`} />
+                <span className={`absolute top-1.5 right-1.5 w-2 h-2 rounded-full ${isFirebaseConnected ? 'bg-emerald-500 ring-2 ring-white dark:ring-slate-900' : 'bg-amber-500'}`} />
+              </button>
+
+              <button
                 onClick={() => setIsDarkMode(!isDarkMode)}
                 className="p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors shrink-0"
                 title="Toggle theme"
@@ -341,10 +417,31 @@ export default function App() {
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {filteredNotices.length === 0 ? (
-          <div className="py-20 text-center text-slate-500 dark:text-slate-400 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl bg-white/50 dark:bg-slate-900/50">
-            <Search className="w-12 h-12 mx-auto text-slate-300 dark:text-slate-600 mb-4" />
-            <p className="text-lg font-medium text-slate-600 dark:text-slate-300">No notices found</p>
-            <p className="text-sm mt-1">Try adjusting your search or filters.</p>
+          <div className="py-12 px-6 text-center text-slate-500 dark:text-slate-400 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-3xl bg-white/60 dark:bg-slate-900/40 backdrop-blur-sm flex flex-col items-center justify-center max-w-xl mx-auto my-8 shadow-sm">
+            <div className="relative mb-5">
+              <img 
+                src={emptyStateImg} 
+                alt="No notices found" 
+                className="w-44 h-44 object-cover rounded-2xl shadow-md border border-slate-100 dark:border-slate-800"
+              />
+              <div className="absolute -bottom-2 -right-2 p-2.5 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 rounded-xl shadow-lg">
+                <Search className="w-4 h-4" />
+              </div>
+            </div>
+            <h3 className="text-xl font-bold text-slate-900 dark:text-white mb-1">No Notices Found</h3>
+            <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm mb-5">
+              {searchQuery 
+                ? `We couldn't find any announcements matching "${searchQuery}".` 
+                : 'There are currently no active announcements in this view.'}
+            </p>
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="px-4 py-2 text-xs font-semibold bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl transition-colors cursor-pointer"
+              >
+                Clear Search Query
+              </button>
+            )}
           </div>
         ) : (
           <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -442,6 +539,16 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Firebase Settings Modal */}
+      {isFirebaseModalOpen && (
+        <FirebaseModal 
+          onClose={() => setIsFirebaseModalOpen(false)} 
+          isConnected={isFirebaseConnected}
+          localNotices={notices}
+          onShowToast={showToast}
+        />
+      )}
 
       {/* Admin Posting Modal */}
       {isModalOpen && (
@@ -721,6 +828,204 @@ function CreateNoticeModal({ onClose, onSubmit }: { onClose: () => void, onSubmi
             </button>
           </div>
         </form>
+      </motion.div>
+    </div>
+  );
+}
+
+function FirebaseModal({ 
+  onClose, 
+  isConnected, 
+  localNotices, 
+  onShowToast 
+}: { 
+  onClose: () => void; 
+  isConnected: boolean; 
+  localNotices: Notice[]; 
+  onShowToast: (msg: string, type?: 'success' | 'info') => void; 
+}) {
+  const currentConfig = getFirebaseConfig() || {
+    apiKey: '',
+    authDomain: 'enoticeboard.firebaseapp.com',
+    projectId: 'enoticeboard',
+    storageBucket: 'enoticeboard.appspot.com',
+    messagingSenderId: '',
+    appId: ''
+  };
+
+  const [apiKey, setApiKey] = useState(currentConfig.apiKey || '');
+  const [projectId, setProjectId] = useState(currentConfig.projectId || 'enoticeboard');
+  const [authDomain, setAuthDomain] = useState(currentConfig.authDomain || 'enoticeboard.firebaseapp.com');
+  const [appId, setAppId] = useState(currentConfig.appId || '');
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  const handleSaveConfig = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!apiKey.trim() || !projectId.trim()) {
+      onShowToast('Please enter an API Key and Project ID', 'info');
+      return;
+    }
+
+    saveCustomFirebaseConfig({
+      apiKey: apiKey.trim(),
+      projectId: projectId.trim(),
+      authDomain: authDomain.trim() || `${projectId.trim()}.firebaseapp.com`,
+      appId: appId.trim()
+    });
+
+    onShowToast('Firebase configuration saved! Re-connecting...', 'success');
+    onClose();
+  };
+
+  const handleReset = () => {
+    resetFirebaseConfig();
+    onShowToast('Reset to default local state', 'info');
+    onClose();
+  };
+
+  const handleSyncLocalNotices = async () => {
+    if (!isConnected) {
+      onShowToast('Please connect Firebase first before syncing', 'info');
+      return;
+    }
+    setIsSyncing(true);
+    try {
+      await syncLocalNoticesToFirestore(localNotices);
+      onShowToast(`Synced ${localNotices.length} notices to Firestore!`, 'success');
+    } catch (err) {
+      console.error(err);
+      onShowToast('Failed to sync notices to Firestore', 'info');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 dark:bg-slate-950/60 backdrop-blur-sm overflow-y-auto transition-colors duration-200">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="bg-white dark:bg-slate-900 rounded-2xl w-full max-w-lg shadow-xl overflow-hidden my-8 border border-slate-100 dark:border-slate-800 transition-colors duration-200"
+      >
+        <div className="flex items-center justify-between p-5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/50">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 bg-amber-500/10 rounded-lg text-amber-500">
+              <Flame className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-slate-900 dark:text-white">Firebase Connection</h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Link project: <span className="font-mono font-semibold text-amber-600 dark:text-amber-400">{projectId}</span></p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-full transition-colors cursor-pointer">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-6">
+          {/* Status Badge */}
+          <div className={`p-4 rounded-xl border flex items-center justify-between ${
+            isConnected 
+              ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20 text-emerald-900 dark:text-emerald-300' 
+              : 'bg-amber-50 dark:bg-amber-500/10 border-amber-200 dark:border-amber-500/20 text-amber-900 dark:text-amber-300'
+          }`}>
+            <div className="flex items-center gap-3">
+              <span className={`w-3 h-3 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
+              <div>
+                <p className="text-sm font-semibold">{isConnected ? 'Firestore Connected' : 'Waiting for Firebase Credentials'}</p>
+                <p className="text-xs opacity-80 mt-0.5">
+                  {isConnected 
+                    ? 'Notices are syncing live across devices in Firestore' 
+                    : 'Enter your Web SDK Web API Key below to connect to project enoticeboard'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <form onSubmit={handleSaveConfig} className="space-y-4">
+            <div>
+              <label htmlFor="fb-project" className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">Firebase Project ID</label>
+              <input 
+                id="fb-project"
+                type="text" 
+                value={projectId}
+                onChange={e => setProjectId(e.target.value)}
+                className="w-full px-3.5 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white rounded-lg text-sm focus:ring-2 focus:ring-slate-900 dark:focus:ring-slate-400 outline-none"
+                placeholder="enoticeboard"
+                required
+              />
+            </div>
+
+            <div>
+              <label htmlFor="fb-apikey" className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">Web API Key (AIzaSy...)</label>
+              <input 
+                id="fb-apikey"
+                type="text" 
+                value={apiKey}
+                onChange={e => setApiKey(e.target.value)}
+                className="w-full px-3.5 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono text-sm rounded-lg focus:ring-2 focus:ring-slate-900 dark:focus:ring-slate-400 outline-none"
+                placeholder="Paste your Firebase Web API Key here..."
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="fb-authdomain" className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">Auth Domain (Optional)</label>
+                <input 
+                  id="fb-authdomain"
+                  type="text" 
+                  value={authDomain}
+                  onChange={e => setAuthDomain(e.target.value)}
+                  className="w-full px-3.5 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm rounded-lg focus:ring-2 focus:ring-slate-900 dark:focus:ring-slate-400 outline-none"
+                  placeholder="enoticeboard.firebaseapp.com"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="fb-appid" className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">App ID (Optional)</label>
+                <input 
+                  id="fb-appid"
+                  type="text" 
+                  value={appId}
+                  onChange={e => setAppId(e.target.value)}
+                  className="w-full px-3.5 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono text-sm rounded-lg focus:ring-2 focus:ring-slate-900 dark:focus:ring-slate-400 outline-none"
+                  placeholder="1:1234567890:web:abcdef"
+                />
+              </div>
+            </div>
+
+            <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-3">
+              <button 
+                type="button" 
+                onClick={handleReset}
+                className="text-xs text-slate-500 hover:text-red-500 dark:text-slate-400 dark:hover:text-red-400 underline transition-colors cursor-pointer"
+              >
+                Clear Custom Config
+              </button>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                {isConnected && (
+                  <button 
+                    type="button"
+                    onClick={handleSyncLocalNotices}
+                    disabled={isSyncing}
+                    className="inline-flex items-center px-3.5 py-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                    Sync Notices
+                  </button>
+                )}
+
+                <button 
+                  type="submit" 
+                  className="px-4 py-2 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 rounded-lg text-xs font-semibold hover:bg-slate-800 dark:hover:bg-slate-200 transition-colors cursor-pointer"
+                >
+                  Save & Connect
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
       </motion.div>
     </div>
   );
