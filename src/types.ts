@@ -9,4 +9,5 @@ export interface Notice {
   date: string;
   category: Category;
   isUrgent: boolean;
+  dueDate?: string;
 }

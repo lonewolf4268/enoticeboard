@@ -49,6 +49,7 @@ export const initialNotices: Notice[] = [
     department: 'Academic Affairs',
     date: new Date(Date.now() - 1000 * 60 * 60 * 12).toISOString(), // 12 hours ago
     category: 'Administrative',
-    isUrgent: true
+    isUrgent: true,
+    dueDate: new Date(Date.now() + 1000 * 60 * 60 * 24 * 2 + 1000 * 60 * 60 * 5).toISOString() // 2 days and 5 hours from now
   }
 ];
